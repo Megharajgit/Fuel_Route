@@ -1,0 +1,52 @@
+{% load static %}
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#f4f6f2">
+  <title>Fuelwise — Route planner</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+  <link rel="stylesheet" href="{% static 'planner/styles.css' %}">
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" defer></script>
+  <script src="{% static 'planner/app.js' %}" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="/" aria-label="Fuelwise home"><span class="brand-mark">↗</span> fuelwise</a>
+    <span class="top-note">FUEL SMARTER. GO FURTHER.</span>
+    <a class="api-link" href="/api/health/">API status <span>↗</span></a>
+  </header>
+  <main class="layout">
+    <section class="intro">
+      <p class="eyebrow"><span></span> YOUR NEXT ROAD TRIP, OPTIMIZED</p>
+      <h1>Good routes.<br><em>Better fill-ups.</em></h1>
+      <p class="lede">Plan your drive across the US. We’ll find the most cost-effective fuel stops that keep every leg within your 500-mile range.</p>
+      <div class="stats"><div><strong>500 <small>mi</small></strong><span>MAX RANGE</span></div><div><strong>10 <small>mpg</small></strong><span>VEHICLE EFFICIENCY</span></div><div><strong>8.1k <small>+</small></strong><span>FUEL PRICE RECORDS</span></div></div>
+      <form id="route-form" class="route-form">
+        <label for="start">STARTING POINT</label>
+        <div class="input-wrap"><span class="pin start-pin"></span><input id="start" name="start" autocomplete="address-level2" value="Denver, CO" placeholder="City, ST" required></div>
+        <label for="finish">DESTINATION</label>
+        <div class="input-wrap"><span class="pin end-pin"></span><input id="finish" name="finish" autocomplete="address-level2" value="Chicago, IL" placeholder="City, ST" required></div>
+        <button id="submit" type="submit"><span>Plan my route</span><b>→</b></button>
+        <p class="form-hint">Enter a US city followed by its two-letter state code.</p>
+      </form>
+      <div id="error" class="error" role="alert" hidden></div>
+    </section>
+    <section class="results" aria-label="Route results">
+      <div id="empty" class="empty-state"><div class="empty-icon">⌖</div><span>YOUR ROUTE, AT A GLANCE</span><h2>Let’s find your<br>best way there.</h2><p>Enter two US cities to see your drive, fuel stops, and estimated fuel cost.</p><div class="map-deco"><i></i><i></i><i></i><i></i><i></i><span>↗</span></div></div>
+      <div id="loading" class="loading" hidden><div class="spinner"></div><strong>Finding your best route…</strong><span>Checking route distance and fuel prices</span></div>
+      <div id="result" hidden>
+        <div class="result-heading"><div><span class="section-kicker">YOUR TRIP PLAN</span><h2 id="route-title">Denver to Chicago</h2></div><button id="reset" class="reset" type="button">New route ↗</button></div>
+        <div id="map" aria-label="Map showing the driving route and fuel stops"></div>
+        <div class="summary-cards"><article><span>ROUTE DISTANCE</span><strong id="distance">—</strong></article><article class="cost-card"><span>EST. FUEL COST</span><strong id="cost">—</strong></article><article><span>FUEL STOPS</span><strong id="stop-count">—</strong></article></div>
+        <div class="stop-heading"><div><span class="section-kicker">ALONG THE WAY</span><h3>Recommended fill-ups</h3></div><span id="total-gallons" class="gallons"></span></div>
+        <ol id="stops" class="stop-list"></ol>
+        <p id="assumption" class="assumption"></p>
+        <p class="attribution">Map data © <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noreferrer">OpenStreetMap</a> contributors · Fuel prices from assessment dataset</p>
+      </div>
+    </section>
+  </main>
+  <footer><span>FUELWISE ROUTE PLANNER</span><span>Built for smarter miles <b>✳</b></span></footer>
+</body>
+</html>
