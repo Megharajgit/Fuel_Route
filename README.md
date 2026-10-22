@@ -14,7 +14,7 @@ pip install -r requirements.txt
 py manage.py runserver
 ```
 
-Open `http://127.0.0.1:8000/`. The first route request batch-geocodes the station cities through the US Census Geocoder and caches their coordinates in `data/city-coordinates.json`. Each route uses one OSRM request. Both services are free to use without an API key; the first request may take longer while the 4,271 unique station cities are geocoded.
+Open `http://127.0.0.1:8000/`. The app uses bundled 2025 Census Gazetteer place centers to match fuel stations locally. It calls the Census batch geocoder only when a requested trip endpoint is missing from the local place file, and saves that result in `data/city-coordinates.json`. Each trip uses one OSRM routing request. Gazetteer points are approximate city centers, not exact station coordinates. A local geographic grid narrows route-segment checks without a separate vector database.
 
 ## API
 
@@ -39,12 +39,12 @@ curl -X POST http://127.0.0.1:8000/api/route/ \
 
 ## Cost model
 
-The supplied CSV has 8,151 station records and 4,271 distinct city/state pairs. The Census batch geocoder resolves `1 Main St` in each city as a town-level coordinate estimate. Stations are projected onto the OSRM route; stations within 18 miles of the route are considered. Dynamic programming chooses a sequence of fuel purchases with no leg over 500 miles, minimizing estimated dollars at the CSV price. The vehicle starts with an empty tank and buys enough fuel for each next leg. A town-level coordinate is approximate; the CSV does not contain station latitude/longitude.
+The supplied CSV has 8,151 station records and 4,271 distinct city/state pairs. The bundled Gazetteer resolves incorporated places and census-designated places to representative town centers; station cities absent from the Gazetteer are skipped; the Census geocoder is reserved for missing trip endpoints. Stations are projected onto the OSRM route; stations within 18 miles of the route are considered. Dynamic programming chooses a sequence of fuel purchases with no leg over 500 miles, minimizing estimated dollars at the CSV price. The vehicle starts with an empty tank and buys enough fuel for each next leg. Coordinates are town-level estimates because the CSV does not contain station latitude/longitude.
 
 ## Free services
 
-- [US Census Geocoder batch API](https://geocoding.geo.census.gov/geocoder/Geocoding_Services_API.html) for city coordinates.
+- [2025 Census Gazetteer](https://www.census.gov/geographies/reference-files/time-series/geo/gazetteer-files.2025.html) for local city/place coordinates, with the [US Census Geocoder batch API](https://geocoding.geo.census.gov/geocoder/Geocoding_Services_API.html) as a fallback.
 - [OSRM routing API](https://project-osrm.org/docs/v26.6.1/http) for one driving route request.
-- [OpenStreetMap tiles](https://www.openstreetmap.org/copyright) via Leaflet for the map.
+- [OpenFreeMap](https://openfreemap.org/) Positron vector style via MapLibre GL JS for the map; the map displays OpenFreeMap, OpenMapTiles, and OpenStreetMap attribution.
 
-The Census batch service accepts up to 10,000 records per request. Station coordinates are cached locally after the first successful batch. For a production deployment, warm the cache once before accepting user traffic and replace shared public services with hosted instances or a provider with a production service agreement.
+The Census batch service is used only for missing trip endpoints, so a route does not wait for thousands of station-town lookups. A local grid index speeds up matching station city centers to route segments. For production, use exact station coordinates and a maintained routing service.

@@ -1,41 +1,108 @@
+import * as maplibregl from "https://unpkg.com/maplibre-gl@6.15.0/dist/maplibre-gl.mjs";
+
 (() => {
   const form = document.querySelector("#route-form");
+  const layout = document.querySelector(".layout");
   const empty = document.querySelector("#empty");
   const loading = document.querySelector("#loading");
   const result = document.querySelector("#result");
   const error = document.querySelector("#error");
   const button = document.querySelector("#submit");
   let map;
-  let layers;
+  let routeLayers = [];
+  let markers = [];
 
-  function dollars(value) { return new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format(value); }
+  function dollars(value) {
+    return new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format(value);
+  }
+
+  function makeMarker(label, kind) {
+    const element = document.createElement("div");
+    element.className = `fuel-map-marker ${kind}`;
+    const text = document.createElement("span");
+    text.textContent = label;
+    element.append(text);
+    return element;
+  }
+
+  function addFuelMarker(point, label, kind, popupLines = []) {
+    const marker = new maplibregl.Marker({ element: makeMarker(label, kind), anchor: "bottom" })
+      .setLngLat([point.longitude, point.latitude]);
+    if (popupLines.length) {
+      const content = document.createElement("div");
+      content.className = "map-popup";
+      popupLines.forEach((line, index) => {
+        const item = document.createElement(index === 0 ? "strong" : "span");
+        item.textContent = line;
+        content.append(item);
+      });
+      marker.setPopup(new maplibregl.Popup({ offset: 18 }).setDOMContent(content));
+    }
+    marker.addTo(map);
+    markers.push(marker);
+  }
+
+  function drawRoute(data) {
+    if (!map.isStyleLoaded()) {
+      map.once("load", () => drawRoute(data));
+      return;
+    }
+    markers.forEach((marker) => marker.remove());
+    markers = [];
+    routeLayers.forEach((id) => {
+      if (map.getLayer(id)) map.removeLayer(id);
+    });
+    if (map.getSource("fuelwise-route")) map.removeSource("fuelwise-route");
+    routeLayers = [];
+
+    const coordinates = data.route.coordinates.map(([latitude, longitude]) => [longitude, latitude]);
+    map.addSource("fuelwise-route", {
+      type: "geojson",
+      data: { type: "Feature", properties: {}, geometry: { type: "LineString", coordinates } },
+    });
+    map.addLayer({
+      id: "fuelwise-route-casing", type: "line", source: "fuelwise-route",
+      layout: { "line-cap": "round", "line-join": "round" },
+      paint: { "line-color": "#ffffff", "line-width": 9, "line-opacity": 0.9 },
+    });
+    map.addLayer({
+      id: "fuelwise-route-line", type: "line", source: "fuelwise-route",
+      layout: { "line-cap": "round", "line-join": "round" },
+      paint: { "line-color": "#24664f", "line-width": 5 },
+    });
+    routeLayers = ["fuelwise-route-casing", "fuelwise-route-line"];
+
+    addFuelMarker(data.start, "S", "start-marker");
+    addFuelMarker(data.finish, "F", "finish-marker");
+    data.stops.forEach((stop, index) => {
+      addFuelMarker(stop, String(index + 1), "stop-marker", [
+        stop.name,
+        `${stop.city}, ${stop.state}`,
+        `${dollars(stop.pricePerGallon)} per gallon`,
+      ]);
+    });
+
+    const bounds = new maplibregl.LngLatBounds();
+    coordinates.forEach((coordinate) => bounds.extend(coordinate));
+    map.fitBounds(bounds, { padding: 58, maxZoom: 7, duration: 600 });
+    window.setTimeout(() => map.resize(), 80);
+  }
 
   function showMap(data) {
-    if (!window.L) return;
     if (!map) {
-      map = L.map("map", { scrollWheelZoom: false, zoomControl: true });
-      L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
-        maxZoom: 18,
-        attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
-      }).addTo(map);
+      map = new maplibregl.Map({
+        container: "map",
+        style: "https://tiles.openfreemap.org/styles/positron",
+        center: [-98.5, 39.8],
+        zoom: 3.5,
+        cooperativeGestures: true,
+        attributionControl: true,
+      });
+      map.addControl(new maplibregl.NavigationControl({ showCompass: false }), "top-left");
+      map.once("load", () => drawRoute(data));
+    } else {
+      drawRoute(data);
     }
-    if (layers) layers.forEach((layer) => layer.remove());
-    layers = [];
-    const route = data.route.coordinates;
-    const line = L.polyline(route, { color: "#216d53", weight: 5, opacity: 0.9, lineCap: "round" }).addTo(map);
-    layers.push(line);
-    const start = data.start;
-    const finish = data.finish;
-    [[start, "S", "#285b47"], [finish, "F", "#e79057"]].forEach(([point, label, color]) => {
-      layers.push(L.marker([point.latitude, point.longitude], { icon: L.divIcon({ className: "map-marker", html: `<span style="--marker:${color}">${label}</span>`, iconSize: [30, 30], iconAnchor: [15, 15] }) }).addTo(map));
-    });
-    data.stops.forEach((stop, index) => {
-      const marker = L.marker([stop.latitude, stop.longitude], { icon: L.divIcon({ className: "map-marker", html: `<span class="stop-marker">${index + 1}</span>`, iconSize: [28, 28], iconAnchor: [14, 14] }) }).addTo(map);
-      marker.bindPopup(`<strong>${stop.name}</strong><br>${stop.city}, ${stop.state}<br>${dollars(stop.pricePerGallon)}/gal`);
-      layers.push(marker);
-    });
-    map.fitBounds(line.getBounds(), { padding: [28, 28] });
-    setTimeout(() => map.invalidateSize(), 50);
   }
 
   function render(data) {
@@ -64,7 +131,9 @@
     empty.hidden = true;
     loading.hidden = true;
     result.hidden = false;
+    layout.classList.add("has-results");
     showMap(data);
+    window.setTimeout(() => document.querySelector(".result-heading").scrollIntoView({ behavior: "smooth", block: "start" }), 80);
   }
 
   form.addEventListener("submit", async (event) => {
@@ -80,7 +149,7 @@
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ start: form.start.value, finish: form.finish.value }),
-        signal: AbortSignal.timeout(55000),
+        signal: AbortSignal.timeout(210000),
       });
       const payload = await response.json();
       if (!response.ok) throw new Error(payload.error || "Could not plan that route.");
@@ -100,6 +169,8 @@
     result.hidden = true;
     empty.hidden = false;
     error.hidden = true;
+    layout.classList.remove("has-results");
     form.start.focus();
+    window.scrollTo({ top: 0, behavior: "smooth" });
   });
 })();

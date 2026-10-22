@@ -6,10 +6,10 @@
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="theme-color" content="#f4f6f2">
   <title>Fuelwise — Route planner</title>
-  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+  <link rel="stylesheet" href="https://unpkg.com/maplibre-gl@6.15.0/dist/maplibre-gl.css">
   <link rel="stylesheet" href="{% static 'planner/styles.css' %}">
-  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" defer></script>
-  <script src="{% static 'planner/app.js' %}" defer></script>
+
+  <script type="module" src="{% static 'planner/app.js' %}"></script>
 </head>
 <body>
   <header class="topbar">
@@ -43,7 +43,7 @@
         <div class="stop-heading"><div><span class="section-kicker">ALONG THE WAY</span><h3>Recommended fill-ups</h3></div><span id="total-gallons" class="gallons"></span></div>
         <ol id="stops" class="stop-list"></ol>
         <p id="assumption" class="assumption"></p>
-        <p class="attribution">Map data © <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noreferrer">OpenStreetMap</a> contributors · Fuel prices from assessment dataset</p>
+        <p class="attribution">Fuel prices from assessment dataset</p>
       </div>
     </section>
   </main>

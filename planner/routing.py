@@ -1,4 +1,4 @@
-"""Fuel-aware routing using one Census batch geocode and one OSRM route request."""
+"""Fuel-aware routing using local station coordinates and one OSRM route request."""
 
 import csv
 import io
@@ -15,12 +15,14 @@ from urllib.request import Request, urlopen
 BASE_DIR = Path(__file__).resolve().parent.parent
 DATA_FILE = BASE_DIR / "data" / "fuel-prices.csv"
 CACHE_FILE = BASE_DIR / "data" / "city-coordinates.json"
+PLACE_COORDS_FILE = BASE_DIR / "data" / "place-coordinates.json"
 RANGE_MILES = 500.0
 MPG = 10.0
 EARTH_MILES = 3958.7613
 STATE_CODES = set("AL AK AZ AR CA CO CT DE FL GA HI ID IL IN IA KS KY LA ME MD MA MI MN MS MO MT NE NV NH NJ NM NY NC ND OH OK OR PA RI SC SD TN TX UT VT VA WA WV WI WY DC".split())
 _stations = None
 _city_coords = None
+_place_coords = None
 _lock = threading.Lock()
 
 
@@ -73,14 +75,32 @@ def _read_cache():
     return _city_coords
 
 
+def _read_place_coords():
+    """Load the local Census Gazetteer city/place centers."""
+    global _place_coords
+    if _place_coords is None:
+        try:
+            _place_coords = json.loads(PLACE_COORDS_FILE.read_text(encoding="utf-8-sig"))
+        except (OSError, json.JSONDecodeError):
+            _place_coords = {}
+    return _place_coords
+
+
 def _csv_field(value):
     return '"' + str(value).replace('"', '""') + '"'
 
 
 def _geocode_city_batch(cities):
-    """Resolve missing station cities together; cache each result locally."""
+    """Resolve missing trip endpoint cities together; cache each result locally."""
     with _lock:
         cache = _read_cache()
+        place_coords = _read_place_coords()
+        for city in cities:
+            key = _city_key(*city)
+            if place_coords.get(key):
+                # Prefer a true city/place center over the old "1 Main St" guess.
+                cache[key] = place_coords[key]
+        # Null entries are cached no-matches. Only send cities never attempted before.
         missing = [city for city in cities if _city_key(*city) not in cache]
         if not missing:
             return cache, 0
@@ -94,10 +114,10 @@ def _geocode_city_batch(cities):
         body = "\n".join(rows).encode("utf-8")
         boundary = f"----SpotterFuelRoute{int(time.time() * 1000)}"
         chunks = [
-            f"--{boundary}\r\nContent-Disposition: form-data; name=\"benchmark\"\r\n\r\nPublic_AR_Current\r\n".encode(),
-            f"--{boundary}\r\nContent-Disposition: form-data; name=\"addressFile\"; filename=\"fuel-cities.csv\"\r\nContent-Type: text/csv\r\n\r\n".encode(),
+            f'--{boundary}\r\nContent-Disposition: form-data; name="benchmark"\r\n\r\nPublic_AR_Current\r\n'.encode(),
+            f'--{boundary}\r\nContent-Disposition: form-data; name="addressFile"; filename="fuel-cities.csv"\r\nContent-Type: text/csv\r\n\r\n'.encode(),
             body,
-            f"\r\n--{boundary}--\r\n".encode(),
+            f'\r\n--{boundary}--\r\n'.encode(),
         ]
         request = Request(
             "https://geocoding.geo.census.gov/geocoder/locations/addressbatch",
@@ -106,7 +126,7 @@ def _geocode_city_batch(cities):
             method="POST",
         )
         try:
-            with urlopen(request, timeout=25) as response:
+            with urlopen(request, timeout=180) as response:
                 result_text = response.read().decode("utf-8-sig")
         except HTTPError as exc:
             raise RouteError(f"Census geocoding failed (HTTP {exc.code}). Try again shortly.", 502) from exc
@@ -178,14 +198,45 @@ def _route(start, finish):
     return route["geometry"]["coordinates"], float(route["distance"]) / 1609.344
 
 
-def _project_station(station, coordinates):
-    """Return route distance and lateral distance for the nearest route segment."""
+def _build_route_spatial_index(coordinates, cell_degrees=0.5):
+    """Index route segments in geographic grid cells for fast local projections."""
+    buckets = {}
+    lengths = []
+    cumulative = [0.0]
+    for a, b in zip(coordinates, coordinates[1:]):
+        length = _haversine((a[1], a[0]), (b[1], b[0]))
+        lengths.append(length)
+        cumulative.append(cumulative[-1] + length)
+        min_x = math.floor(min(a[0], b[0]) / cell_degrees)
+        max_x = math.floor(max(a[0], b[0]) / cell_degrees)
+        min_y = math.floor(min(a[1], b[1]) / cell_degrees)
+        max_y = math.floor(max(a[1], b[1]) / cell_degrees)
+        for grid_x in range(min_x, max_x + 1):
+            for grid_y in range(min_y, max_y + 1):
+                buckets.setdefault((grid_x, grid_y), []).append(len(lengths) - 1)
+    return {"coordinates": coordinates, "buckets": buckets, "cellDegrees": cell_degrees,
+            "lengths": lengths, "cumulative": cumulative, "total": cumulative[-1]}
+
+
+def _project_station(station, route_index):
+    """Return route distance and lateral distance for nearby route segments."""
     point = (station["lat"], station["lon"])
-    lengths = [_haversine((a[1], a[0]), (b[1], b[0])) for a, b in zip(coordinates, coordinates[1:])]
-    total = sum(lengths)
-    walked = 0.0
+    coordinates = route_index["coordinates"]
+    cell_degrees = route_index["cellDegrees"]
+    # A 20-mile search window safely covers the 18-mile candidate threshold.
+    lat_radius = 20.0 / 69.0
+    lon_radius = lat_radius / max(0.25, math.cos(math.radians(point[0])))
+    min_x = math.floor((point[1] - lon_radius) / cell_degrees)
+    max_x = math.floor((point[1] + lon_radius) / cell_degrees)
+    min_y = math.floor((point[0] - lat_radius) / cell_degrees)
+    max_y = math.floor((point[0] + lat_radius) / cell_degrees)
+    segment_ids = set()
+    for grid_x in range(min_x, max_x + 1):
+        for grid_y in range(min_y, max_y + 1):
+            segment_ids.update(route_index["buckets"].get((grid_x, grid_y), ()))
     best = None
-    for index, (a, b) in enumerate(zip(coordinates, coordinates[1:])):
+    for index in segment_ids:
+        a, b = coordinates[index], coordinates[index + 1]
         mid_lat = math.radians((a[1] + b[1] + point[0]) / 3)
         scale_x = math.cos(mid_lat) * 69.0
         ax, ay = a[0] * scale_x, a[1] * 69.0
@@ -196,32 +247,33 @@ def _project_station(station, coordinates):
         fraction = 0 if denominator == 0 else max(0, min(1, ((px - ax) * dx + (py - ay) * dy) / denominator))
         distance = math.hypot(px - (ax + fraction * dx), py - (ay + fraction * dy))
         if best is None or distance < best[0]:
-            best = (distance, walked + fraction * lengths[index])
-        walked += lengths[index]
-    return best[1] * (total and 1.0 or 0.0), best[0], total
+            along = route_index["cumulative"][index] + fraction * route_index["lengths"][index]
+            best = (distance, along)
+    if best is None:
+        return 0.0, math.inf, route_index["total"]
+    return best[1], best[0], route_index["total"]
 
-
-def _fuel_plan(stations, coordinates, route_miles, start, finish):
+def _fuel_plan(stations, coordinates, route_miles, start, finish, city_coordinates):
     candidates = []
+    located_stations = []
     projected_cities = {}
-    geometry_length = sum(_haversine((a[1], a[0]), (b[1], b[0])) for a, b in zip(coordinates, coordinates[1:]))
+    route_index = _build_route_spatial_index(coordinates)
+    geometry_length = route_index["total"]
     if geometry_length <= 0:
         raise RouteError("The routing service returned invalid route geometry.", 502)
     for station in stations:
         key = _city_key(station["city"], station["state"])
-        location = _read_cache().get(key)
+        location = city_coordinates.get(key)
         if not location:
             continue
         station["lat"], station["lon"] = location
+        located_stations.append(station)
         if key not in projected_cities:
-            projected_cities[key] = _project_station(station, coordinates)[:2]
+            projected_cities[key] = _project_station(station, route_index)[:2]
         along, lateral = projected_cities[key]
         if lateral <= 18:
             station["routeMile"] = along
             candidates.append(station)
-    if not candidates:
-        raise RouteError("No fuel stations could be matched near this route. Check that the city geocoder has completed and retry.", 422)
-
     # OSRM distance can differ from geometry length; scale projections to route miles.
     for station in candidates:
         station["routeMile"] = min(route_miles, max(0, station["routeMile"] * route_miles / geometry_length))
@@ -235,11 +287,12 @@ def _fuel_plan(stations, coordinates, route_miles, start, finish):
             bins[mile] = station
     ordered = sorted(bins.values(), key=lambda station: station["routeMile"])
     start_options = [
-        station for station in ordered
-        if station["routeMile"] <= 3 and _haversine((station["lat"], station["lon"]), start) <= 10
+        station for station in candidates
+        if station["routeMile"] <= 25
+        and _haversine((station["lat"], station["lon"]), start) <= 25
     ]
     if not start_options:
-        raise RouteError("No listed fuel station was found within 10 miles of the starting city.", 422)
+        raise RouteError("No listed fuel station was found within 25 miles of the starting city.", 422)
     start_point = min(start_options, key=lambda station: station["price"])
     start_point = dict(start_point, routeMile=0.0)
     nodes = [start_point] + [s for s in ordered if 3 < s["routeMile"] < route_miles - 1]
@@ -285,9 +338,8 @@ def plan_trip(start_text, finish_text):
         raise RouteError("Both start and finish locations are required.")
     start_city, finish_city = _geocode_trip_inputs(start_text, finish_text)
     stations = _load_stations()
-    cities = {(station["city"], station["state"]) for station in stations}
-    cities.update((start_city, finish_city))
-    cache, geocode_calls = _geocode_city_batch(sorted(cities))
+    # Only geocode requested endpoints; bundled Gazetteer coordinates cover station towns.
+    cache, geocode_calls = _geocode_city_batch([start_city, finish_city])
     start = cache.get(_city_key(*start_city))
     finish = cache.get(_city_key(*finish_city))
     if not start or not finish:
@@ -295,7 +347,9 @@ def plan_trip(start_text, finish_text):
     coordinates, route_miles = _route(start, finish)
     if route_miles <= 0:
         raise RouteError("The routing service returned a zero-length route.", 422)
-    stops, total_cost, start_station = _fuel_plan(stations, coordinates, route_miles, start, finish)
+    city_coordinates = dict(_read_place_coords())
+    city_coordinates.update({key: value for key, value in cache.items() if value})
+    stops, total_cost, start_station = _fuel_plan(stations, coordinates, route_miles, start, finish, city_coordinates)
     return {
         "start": {"label": start_text, "latitude": start[0], "longitude": start[1]},
         "finish": {"label": finish_text, "latitude": finish[0], "longitude": finish[1]},
@@ -304,5 +358,5 @@ def plan_trip(start_text, finish_text):
         "fuel": {"totalGallons": round(route_miles / MPG, 2), "totalEstimatedCost": round(total_cost, 2), "currency": "USD", "startFuelPricePerGallon": start_station["price"]},
         "stops": stops,
         "externalApiCalls": {"censusBatchGeocoding": geocode_calls, "osrmRouting": 1},
-        "assumptions": ["Fuel cost is based on the supplied retail prices and 10 MPG.", "The vehicle begins with an empty tank and buys enough fuel at each selected stop for the next leg.", "Station coordinates use a Census geocode for 1 Main St in the listed city as a town-level location estimate."],
+        "assumptions": ["Fuel cost is based on the supplied retail prices and 10 MPG.", "The vehicle begins with an empty tank and buys enough fuel at each selected stop for the next leg.", "Fuel station positions use bundled Census Gazetteer place centers where available; they are town-level estimates, not exact station pins."],
     }
